@@ -1,27 +1,40 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import groovy.transform.ToString
+import groovy.transform.EqualsAndHashCode
 
 /**
  * Represents an Eiffel link
- * @param type the link type
- * @param target UUID of target, corresponds to meta.id of the target event
+ * @param type the link type.
+ * @param target UUID of target, corresponds to meta.id of the target event.
  */
 @ToString
+@EqualsAndHashCode
 class Link  {
-    String type
+    Type type
     UUID target
 
-    Link(String type, UUID target) {
+    Link(Type type, UUID target) {
         this.type = type
         this.target = target
+    }
+
+    // Legal link types
+    enum Type {
+        ARTIFACT,
+        CAUSE,
+        CONTEXT,
+        FLOW_CONTEXT
     }
 }
 
 /**
  * Represents an Eiffel location
  * @param type The type of location.
- * @param uri The URI at which the artifact can be retrieved
+ * @param uri The URI at which the artifact can be retrieved.
  */
 @ToString
+@EqualsAndHashCode
 class Location {
     Type type
     String uri
@@ -31,6 +44,7 @@ class Location {
         this.uri = uri
     }
 
+    // Legal location types
     enum Type {
         ARTIFACTORY,
         NEXUS,
@@ -39,7 +53,16 @@ class Location {
     }
 }
 
+/**
+ * Represents an Eiffel source
+ * @param domainId Identifies the domain that produced an event.
+ * @param host The hostname of the event sender.
+ * @param name The name of the event sender.
+ * @param serializer The identity of the serializer software used to construct the event, in purl format.
+ * @param uri The URI of, related to or describing the event sender.
+ */
 @ToString
+@EqualsAndHashCode
 class Source {
     String domainId
     String host
@@ -48,16 +71,31 @@ class Source {
     String uri
 }
 
+/**
+ * Abstract class representing Eiffel meta data, all event meta classes must extend this class.
+ * @param id The unique identity of the event, generated at event creation.
+ * @param time The event creation timestamp, in milliseconds.
+ * @param type The type of event.
+ * @param version The version of the event type.
+ * @param tags Tags or keywords associated with the events, for searchability purposes.
+ * @param source The source of the event.
+ */
 @ToString
-class Meta {
+@EqualsAndHashCode
+abstract class Meta {
+    // Required default values
     UUID id = UUID.randomUUID()
     long time = System.currentTimeMillis()
-    String type
+    String type = this.class.getSimpleName().split("Meta")[0]
+
+    // Required
     String version
+
+    // Optional
     List<String> tags
     Source source
 
-    Meta(Map optional = [:], String type, String version) {
+    Meta(Map optional = [:], String version) {
         this.type = type
         this.version = version
         this.tags = optional.tags
@@ -65,8 +103,14 @@ class Meta {
     }
 }
 
+interface EiffelEvent {
+    Meta getMeta()
+    List<Link> getLinks()
+}
+
 @ToString
-class EiffelArtifactPublishedEvent {
+@EqualsAndHashCode
+class EiffelArtifactPublishedEvent implements EiffelEvent {
     EiffelArtifactPublishedEventMeta meta
     EiffelArtifactPublishedEventData data
     List<Link> links
@@ -83,16 +127,17 @@ class EiffelArtifactPublishedEvent {
 class EiffelArtifactPublishedEventMeta extends Meta {
 
     EiffelArtifactPublishedEventMeta(Map optional = [:]) {
-        super(optional, "EiffelArtifactPublishedEvent", "3.0.0")
+        super(optional, "3.0.0")
     }
 
     @Override
     String toString() {
-        return "EiffelArtifactPublishedEvent" + super.toString()
+        return type + super.toString()
     }
 }
 
 @ToString
+@EqualsAndHashCode
 class EiffelArtifactPublishedEventData {
     List<Location> locations
 
@@ -100,6 +145,43 @@ class EiffelArtifactPublishedEventData {
         this.locations = locations
     }
 }
+
+/**
+ * Class with helper methods for handling json data
+ */
+class JsonHelper {
+    /**
+     * Removes null values and empty lists from json data
+     * @param json The json string to clean
+     * @return a json string with all null values and empty lists removed
+     */
+    static String cleanJson(String json) {
+        def jsonMap = new JsonSlurper().parseText(json)
+        return JsonOutput.toJson(removeNullFromJsonObject(jsonMap))
+    }
+
+    /**
+     * Recursively removes all null values and empty collections from objects representing json data
+     * @param jsonObject The object representing the json data
+     */
+    private static def removeNullFromJsonObject(Object jsonObject) {
+        if (jsonObject instanceof Map) {
+            jsonObject.collectEntries {key, value ->
+                if (value) {
+                    [(key): removeNullFromJsonObject(value)]
+                }
+                else [:]
+            }
+        }
+        else if (jsonObject instanceof Collection) {
+            jsonObject.collect { removeNullFromJsonObject(it) }.findAll { it != null }
+        }
+        else {
+            jsonObject
+        }
+    }
+}
+
 /**
  * Handle after create events.
  *
