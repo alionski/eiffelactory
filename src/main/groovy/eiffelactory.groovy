@@ -6,6 +6,7 @@
  */
 
 import org.artifactory.fs.FileInfo
+import org.artifactory.fs.FileLayoutInfo
 import org.artifactory.fs.ItemInfo
 
 storage {
@@ -27,10 +28,6 @@ def toFile(ItemInfo item) {
     def repoKey = item.getRepoKey()
     def repoPath = item.getRepoPath().toPath()
     def isFolder = item.isFolder() as String
-    def checksums = "None"
-    if (item instanceof FileInfo) {
-        checksums = (item as FileInfo).getSha2()
-    }
 
     f.write("Name: " + name + "\n" +
             "Created: " + created + "\n" +
@@ -42,7 +39,31 @@ def toFile(ItemInfo item) {
             "Rel path: " + relPath  + "\n" +
             "Repo key: " +repoKey  + "\n" +
             "Repo path: " + repoPath  + "\n" +
-            "is folder: " + isFolder + "\n" +
-            "sh256: " + checksums)
+            "is folder: " + isFolder + "\n" )
+
+    if (item instanceof FileInfo) {
+        def fileInfo = item as FileInfo
+        def sha256 = fileInfo.getSha2()
+        def sha1 = fileInfo.getSha1()
+        def md5 = fileInfo.getMd5()
+        def mime = fileInfo.getMimeType()
+        def age = fileInfo.getAge() as String
+        def size = fileInfo.getSize()
+
+        f.append("sha256: " + sha256 + "\n" +
+                "sha1: " + sha1 + "\n" +
+                "md5: " + md5 + "\n" +
+                "Mime: " + mime + "\n" +
+                "Age: "  + age + "\n" +
+                "Size: " + size + "\n")
+    }
+
+    if (item instanceof FileLayoutInfo) {
+        def fileLayout = item as FileLayoutInfo
+
+        f.append("base revision: " + fileLayout.getBaseRevision() + "\n" +
+                "Classifier : " + fileLayout.getClassifier() + "\n" +
+                "Ext : " + fileLayout.getExt() + "\n")
+    }
 }
 
