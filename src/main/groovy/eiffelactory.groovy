@@ -2,6 +2,7 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.ToString
 import groovy.transform.EqualsAndHashCode
+import rabbitmq2.*
 
 /**
  * Represents an Eiffel link
@@ -182,6 +183,8 @@ class JsonHelper {
     }
 }
 
+
+
 /**
  * Handle after create events.
  *
@@ -192,6 +195,56 @@ class JsonHelper {
 import org.artifactory.fs.FileInfo
 import org.artifactory.fs.FileLayoutInfo
 import org.artifactory.fs.ItemInfo
+import rabbitmq2.*
+
+class RabbitMQHelper {
+    def File logfile = new File("/tmp/rabbit.log")
+    RecvMQ recv = new RecvMQ()
+    SendMQ send = new SendMQ()
+
+    def String createEiffelMessage() {
+        List<Location> locs = new ArrayList<Location>()
+        locs.add(new Location(Location.Type.ARTIFACTORY, "localhost"))
+        List<Link> links = new ArrayList<Link>()
+        links.add( new Link(Link.Type.ARTIFACT, UUID.randomUUID()))   
+        String msg = new EiffelArtifactPublishedEvent(
+            new EiffelArtifactPublishedEventMeta(),
+            new EiffelArtifactPublishedEventData(locs),
+            links)            
+        return msg
+    }
+
+    def startSender() {
+        new Thread(new Runnable(){
+            void run() {
+                while (true) {
+                    String msg = JsonHelper.cleanJson(JsonOutput.toJson(createEiffelMessage()))
+                    send.send(msg)
+                    def now = new Date()
+                    String timestamp = now.format("yyyyMMdd-HH:mm:ss.SSS", TimeZone.getTimeZone('UTC'))
+                    logfile.append(timestamp + ": Sent\n")
+                    Thread.sleep(5000)
+                }
+            }
+        }).start()
+    }
+
+    def startReceiver() {
+        new Thread( new Runnable() {
+            void run() {
+                while (true) {
+                    recv.startReceiving()
+                    Thread.sleep(5000)
+                }
+            }
+        }).start()
+    }    
+}
+
+RabbitMQHelper rabbit = new RabbitMQHelper()
+rabbit.startSender()
+rabbit.startReceiver()
+
 
 storage {
     afterCreate { item ->
