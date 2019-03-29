@@ -2,7 +2,12 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.ToString
 import groovy.transform.EqualsAndHashCode
-import rabbitmq2.*
+import org.artifactory.fs.FileInfo
+import org.artifactory.fs.FileLayoutInfo
+import org.artifactory.fs.ItemInfo
+// This has to be places as a .jar under /lib
+// TODO: import  and compile later via Maven?
+import rabbitmqeiffelactory.*
 
 /**
  * Represents an Eiffel link
@@ -184,21 +189,12 @@ class JsonHelper {
 }
 
 
-
 /**
- * Handle after create events.
- *
- * Closure parameters:
- * item (org.artifactory.fs.ItemInfo) - the original item being created.
- */
-
-import org.artifactory.fs.FileInfo
-import org.artifactory.fs.FileLayoutInfo
-import org.artifactory.fs.ItemInfo
-import rabbitmq2.*
+ * Class for communicating with RabbitMQ
+**/
 
 class RabbitMQHelper {
-    def File logfile = new File("/tmp/rabbit.log")
+    File logfile = new File("/tmp/rabbit.log")
     RecvMQ recv = new RecvMQ()
     SendMQ send = new SendMQ()
 
@@ -230,21 +226,20 @@ class RabbitMQHelper {
     }
 
     def startReceiver() {
-        new Thread( new Runnable() {
-            void run() {
-                while (true) {
-                    recv.startReceiving()
-                    Thread.sleep(5000)
-                }
-            }
-        }).start()
-    }    
+        recv.startReceiving()
+    }
 }
 
 RabbitMQHelper rabbit = new RabbitMQHelper()
 rabbit.startSender()
 rabbit.startReceiver()
 
+/**
+ * Handle after create events.
+ *
+ * Closure parameters:
+ * item (org.artifactory.fs.ItemInfo) - the original item being created.
+ */
 
 storage {
     afterCreate { item ->
