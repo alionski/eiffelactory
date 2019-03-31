@@ -5,6 +5,9 @@ import groovy.transform.EqualsAndHashCode
 import org.artifactory.fs.FileInfo
 import org.artifactory.fs.FileLayoutInfo
 import org.artifactory.fs.ItemInfo
+import org.artifactory.repo.RepoPathFactory
+import org.artifactory.search.Searches
+import org.artifactory.search.aql.AqlResult
 // This has to be places as a .jar under /lib
 // TODO: import  and compile later via Maven?
 import rabbitmqeiffelactory.*
@@ -247,8 +250,20 @@ storage {
     }
 }
 
+def getMetada(String repoKey) {
+    File storageLog = new File("/tmp/storage_metadata.log")
+    // <domain_query>.find(<criteria>).include(<fields>).sort(<order_and_fields>).offset(<offset_records>).limit(<num_records>)
+    ((Searches) searches).aql(
+        "items.find({\"repo\": \"" + repoKey + "\"}).include(\"name\", \"repo\", \"property.*\")") {
+        AqlResult result ->
+            result.each {
+                storageLog.append(JsonOutput.prettyPrint(JsonOutput.toJson(result)))
+            }
+    }
+}
+
 def toFile(ItemInfo item) {
-    File f = new File("/tmp/test1.log")
+    File f = new File("/tmp/upload_metadata.log")
     def created = item.getCreated() as String
     def createdBy = item.getCreatedBy()
     def id = item.getId() as String
@@ -269,7 +284,7 @@ def toFile(ItemInfo item) {
             "last upd: " + lastUpd + "\n" +
             "Mod by: " + modifiedBy  + "\n" +
             "Rel path: " + relPath  + "\n" +
-            "Repo key: " +repoKey  + "\n" +
+            "Repo key: " + repoKey  + "\n" +
             "Repo path: " + repoPath  + "\n" +
             "is folder: " + isFolder + "\n" )
 
@@ -297,5 +312,7 @@ def toFile(ItemInfo item) {
                 "Classifier : " + fileLayout.getClassifier() + "\n" +
                 "Ext : " + fileLayout.getExt() + "\n")
     }
+
+    getMetada(repoKey)
 }
 
