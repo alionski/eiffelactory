@@ -200,6 +200,7 @@ class RabbitMQHelper {
     File logfile = new File("/tmp/rabbit.log")
     RecvMQ recv = new RecvMQ()
     SendMQ send = new SendMQ()
+    volatile boolean alive = true
 
     def String createEiffelMessage() {
         List<Location> locs = new ArrayList<Location>()
@@ -216,7 +217,7 @@ class RabbitMQHelper {
     def startSender() {
         new Thread(new Runnable(){
             void run() {
-                while (true) {
+                while (alive) {
                     String msg = JsonHelper.cleanJson(JsonOutput.toJson(createEiffelMessage()))
                     send.send(msg)
                     def now = new Date()
@@ -230,6 +231,14 @@ class RabbitMQHelper {
 
     def startReceiver() {
         recv.startReceiving()
+    }
+
+    def stopSender() {
+        alive = false
+    }
+
+    def stopReceiver() {
+        recv.stopReceiving()
     }
 }
 
@@ -247,6 +256,13 @@ rabbit.startReceiver()
 storage {
     afterCreate { item ->
         toFile(item)
+    }
+}
+
+executions {
+    stopThreads() {
+        rabbit.stopSender()
+        rabbit.stopReceiver()
     }
 }
 
