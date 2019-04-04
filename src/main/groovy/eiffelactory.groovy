@@ -5,7 +5,6 @@ import groovy.transform.EqualsAndHashCode
 import org.artifactory.fs.FileInfo
 import org.artifactory.fs.FileLayoutInfo
 import org.artifactory.fs.ItemInfo
-import org.artifactory.repo.RepoPathFactory
 import org.artifactory.search.Searches
 import org.artifactory.search.aql.AqlResult
 // This has to be places as a .jar under /lib
@@ -107,8 +106,8 @@ abstract class Meta {
     Meta(Map optional = [:], String version) {
         this.type = type
         this.version = version
-        this.tags = optional.tags
-        this.source = optional.source
+        this.tags = optional.tags as List<String>
+        this.source = optional.source as Source
     }
 }
 
@@ -191,60 +190,47 @@ class JsonHelper {
     }
 }
 
-
 /**
  * Class for communicating with RabbitMQ
 **/
-
 class RabbitMQHelper {
-    File logfile = new File("/tmp/rabbit.log")
-    RecvMQ recv = new RecvMQ()
-    SendMQ send = new SendMQ()
-    volatile boolean alive = true
+    static File logfile = new File("/tmp/rabbit.log")
+    final static RecvMQ receiver = new RecvMQ()
+    final static SendMQ sender = new SendMQ()
 
-    def String createEiffelMessage() {
-        List<Location> locs = new ArrayList<Location>()
-        locs.add(new Location(Location.Type.ARTIFACTORY, "localhost"))
-        List<Link> links = new ArrayList<Link>()
-        links.add( new Link(Link.Type.ARTIFACT, UUID.randomUUID()))   
-        String msg = new EiffelArtifactPublishedEvent(
-            new EiffelArtifactPublishedEventMeta(),
-            new EiffelArtifactPublishedEventData(locs),
-            links)            
-        return msg
+    static def publish(EiffelEvent eiffelEvent) {
+        String json = JsonHelper.cleanJson(JsonOutput.toJson(eiffelEvent))
+        sender.send(json)
+        String timestamp = new Date().format("yyyyMMdd-HH:mm:ss.SSS", TimeZone.getTimeZone('UTC'))
+        logfile.append(timestamp + ":" + json + "\n")
     }
 
-    def startSender() {
-        new Thread(new Runnable(){
-            void run() {
-                while (alive) {
-                    String msg = JsonHelper.cleanJson(JsonOutput.toJson(createEiffelMessage()))
-                    send.send(msg)
-                    def now = new Date()
-                    String timestamp = now.format("yyyyMMdd-HH:mm:ss.SSS", TimeZone.getTimeZone('UTC'))
-                    logfile.append(timestamp + ": Sent\n")
-                    Thread.sleep(5000)
-                }
-            }
-        }).start()
+    static def startReceiver() {
+        receiver.startReceiving()
     }
 
-    def startReceiver() {
-        recv.startReceiving()
-    }
-
-    def stopSender() {
-        alive = false
-    }
-
-    def stopReceiver() {
-        recv.stopReceiving()
+    static def stopReceiver() {
+        receiver.stopReceiving()
     }
 }
 
-RabbitMQHelper rabbit = new RabbitMQHelper()
-rabbit.startSender()
-rabbit.startReceiver()
+static EiffelArtifactPublishedEvent createEiffelArtifactPublishedEvent(ItemInfo item) {
+    List<Location> locs = new ArrayList<Location>()
+    locs.add(new Location(Location.Type.ARTIFACTORY, item.getRepoPath().toPath()))
+
+    // Just add a random test link for now...
+    List<Link> links = new ArrayList<Link>()
+    links.add( new Link(Link.Type.ARTIFACT, UUID.randomUUID()))
+
+    EiffelArtifactPublishedEvent msg = new EiffelArtifactPublishedEvent(
+            new EiffelArtifactPublishedEventMeta(),
+            new EiffelArtifactPublishedEventData(locs),
+            links)
+
+    return msg
+}
+
+RabbitMQHelper.startReceiver()
 
 /**
  * Handle after create events.
@@ -252,21 +238,23 @@ rabbit.startReceiver()
  * Closure parameters:
  * item (org.artifactory.fs.ItemInfo) - the original item being created.
  */
-
 storage {
     afterCreate { item ->
         toFile(item)
+        RabbitMQHelper.publish(createEiffelArtifactPublishedEvent(item))
     }
 }
 
+/**
+ * Executions triggered by REST api
+ */
 executions {
     stopThreads() {
-        rabbit.stopSender()
-        rabbit.stopReceiver()
+        RabbitMQHelper.stopReceiver()
     }
 }
 
-def getMetada(String repoKey) {
+def getMetadata(String repoKey) {
     File storageLog = new File("/tmp/storage_metadata.log")
     // <domain_query>.find(<criteria>).include(<fields>).sort(<order_and_fields>).offset(<offset_records>).limit(<num_records>)
     ((Searches) searches).aql(
@@ -329,6 +317,6 @@ def toFile(ItemInfo item) {
                 "Ext : " + fileLayout.getExt() + "\n")
     }
 
-    getMetada(repoKey)
+    getMetadata(repoKey)
 }
 
