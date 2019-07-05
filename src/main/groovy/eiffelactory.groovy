@@ -7,13 +7,25 @@ import org.artifactory.fs.FileLayoutInfo
 import org.artifactory.fs.ItemInfo
 import org.artifactory.search.Searches
 import org.artifactory.search.aql.AqlResult
-// This has to be places as a .jar under /lib
+// This has to be placed as a .jar under /lib
 // TODO: import  and compile later via Maven?
 import rabbitmqeiffelactory.*
 
 class Constants {
     // This should obviously be "artifactory-uri" later...
     public static final String ARTIFACTORY_URI = "localhost:8081/artifactory/"
+    public static final String EIFFEL_ARTIFACT_CREATED_EVENT = "EiffelArtifactCreatedEvent"
+    public static final String VERSION_3_0_0 = "3.0.0"
+    public static final String JENKINS_EIFFEL_BROADCASTER = "JENKINS_EIFFEL_BROADCASTER"
+
+    public static final String BUILD_URL_FORMAT = "https://%s/jenkins/%s"
+    public static final String ARTIFACT_PATH_FORMAT = ARTIFACTORY_URI + "%s/%s/%s"
+
+    public static final String AQL_QUERY_NAME_BUILD_NUMBER = 'items.find(' +
+            '{"name":"%s", "artifact.module.build.number":"%s"}).include("name", "repo", "path")'
+
+    public static final String AQL_QUERY_NAME_BUILD_URL = 'items.find(' +
+            '{"name":"%s", "artifact.module.build.url":"%s"}).include("name", "repo", "path")'
 }
 
 /**
@@ -139,7 +151,7 @@ class EiffelArtifactPublishedEvent implements EiffelEvent {
 class EiffelArtifactPublishedEventMeta extends Meta {
 
     EiffelArtifactPublishedEventMeta(Map optional = [:]) {
-        super(optional, "3.0.0")
+        super(optional, Constants.VERSION_3_0_0)
     }
 
     @Override
@@ -194,12 +206,82 @@ class JsonHelper {
     }
 }
 
-class EiffelCallback extends ScriptCallback {
+class EiffelEventParser {
+    static boolean isEiffelArtifactCreatedEvent(String message) {
+        def jsonObject = new JsonSlurper().parseText(message) as Map
+
+        if (!jsonObject.containsKey("meta")) {
+            return false
+        }
+
+        def meta = jsonObject.get("meta") as Map
+        if (!meta.containsKey("type")) {
+            return false
+        }
+
+        return jsonObject.meta.type == Constants.EIFFEL_ARTIFACT_CREATED_EVENT
+    }
+
+    static boolean isSentFromJenkins(String message) {
+        def jsonObject = new JsonSlurper().parseText(message) as Map
+
+        if (!jsonObject.containsKey("meta")) {
+            return false
+        }
+
+        def meta = jsonObject.get("meta") as Map
+        if (!meta.containsKey("source")) {
+            return false
+        }
+
+        def source = meta.get("source") as Map
+        if (!source.containsKey("name")) {
+            return false
+        }
+
+        return jsonObject.meta.source.name == Constants.JENKINS_EIFFEL_BROADCASTER
+    }
+
+    static Map parseJenkinsIdentityPurl(String identity) {
+        def parts = identity.split("@")
+        def buildNumber = parts[1]
+        def filename = parts[0].substring(identity.lastIndexOf("/") + 1)
+        parts = parts[0].split("pkg:")
+        def url = parts[1].substring(0, parts[1].lastIndexOf("/") - "artifacts".length())
+
+        return [buildNumber: buildNumber, fileName: filename, url: url]
+    }
+
+    static String createBuildUrl(String host, String identityUrl) {
+        return String.format(Constants.BUILD_URL_FORMAT, host, identityUrl)
+    }
+}
+
+class EiffelEventListener extends ScriptCallback {
     def static path = "/var/log/eiffelactory/groovy_script_received_jenkins.log"
     File eiffelLogfile = new File(path)
 
     void deliverEiffelMessage(String message) {
-        eiffelLogfile.append(message + " \n\n")
+        if (!EiffelEventParser.isEiffelArtifactCreatedEvent(message)) {
+            return
+        }
+
+        def event = new JsonSlurper().parseText(message) as Map
+
+        def artifacts = new AQLQuery().findArtifactsByNameAndBuildNumber(
+                event.name as String, event.buildNumber as String)
+
+        if (artifacts.size() != 1) {
+            // This should not be possible
+            // TODO: Log to file if this happens
+            return
+        }
+
+        def artifactPublishedEvent = EiffelArtifactPublishedEventCreator.createEiffelArtifactPublishedEvent(
+                UUID.fromString(event.meta.id as String), artifacts[0])
+
+        RabbitMQHelper.publish(artifactPublishedEvent)
+
     }
 }
 
@@ -210,7 +292,7 @@ class RabbitMQHelper {
     // TODO: create /var/log/eiffelactory here
     def static path = "/var/log/eiffelactory/groovy_script_sent.log"
     static File logfile = new File(path)
-    static RecvMQ receiver = new RecvMQ( new EiffelCallback())
+    static RecvMQ receiver = new RecvMQ(new EiffelEventListener())
     static SendMQ sender = new SendMQ()
     static volatile stopped = false
 
@@ -218,6 +300,7 @@ class RabbitMQHelper {
     static def publish(EiffelEvent eiffelEvent) {
         String json = JsonHelper.cleanJson(JsonOutput.toJson(eiffelEvent))
         sender.send(json)
+
         String timestamp = new Date().format("yyyyMMdd-HH:mm:ss.SSS", TimeZone.getTimeZone('UTC'))
         logfile.append(timestamp + ":" + json + "\n")
     }
@@ -235,20 +318,52 @@ class RabbitMQHelper {
     }
 }
 
-static EiffelArtifactPublishedEvent createEiffelArtifactPublishedEvent(ItemInfo item) {
-    def locationUri = Constants.ARTIFACTORY_URI + item.getRepoPath().toPath()
-    def locations = [new Location(Location.Type.ARTIFACTORY, locationUri)] as ArrayList<Location>
+class EiffelArtifactPublishedEventCreator {
+    static EiffelArtifactPublishedEvent createEiffelArtifactPublishedEvent(UUID linkId, AQLQuery.ArtifactInfo artifact) {
+        def locationUri = createArtifactPath(artifact.repo, artifact.path, artifact.name)
+        def locations = [new Location(Location.Type.ARTIFACTORY, locationUri)] as ArrayList<Location>
+        def links = [new Link(Link.Type.ARTIFACT, linkId)] as ArrayList<Link>
+        def tags = [artifact.repo, artifact.path, artifact.name] as ArrayList<String>
 
-    // Just add a random test link for now...
-    def links = [new Link(Link.Type.ARTIFACT, UUID.randomUUID())] as ArrayList<Link>
+        EiffelArtifactPublishedEvent event = new EiffelArtifactPublishedEvent(
+                new EiffelArtifactPublishedEventMeta(tags: tags, source: new Source()),
+                new EiffelArtifactPublishedEventData(locations), links)
 
-    def tags = [item.getName(), item.getRepoKey()] as ArrayList<String>
+        return event
+    }
 
-    EiffelArtifactPublishedEvent event = new EiffelArtifactPublishedEvent(
-            new EiffelArtifactPublishedEventMeta(tags: tags, source: new Source()),
-            new EiffelArtifactPublishedEventData(locations),
-            links)
-    return event
+    private static String createArtifactPath(String repo, String path, String name) {
+        return String.format(Constants.ARTIFACT_PATH_FORMAT, repo, path, name)
+    }
+}
+
+class AQLQuery {
+    class ArtifactInfo {
+        String repo
+        String path
+        String name
+    }
+
+    List<ArtifactInfo> findArtifactsByNameAndBuildNumber(String name, String buildNumber) {
+        def aqlQuery = String.format(Constants.AQL_QUERY_NAME_BUILD_NUMBER, name, buildNumber)
+        return findArtifacts(aqlQuery)
+    }
+
+    List<ArtifactInfo> findArtifactsByNameAndBuildUrl(String name, String buildUrl) {
+        def aqlQuery = String.format(Constants.AQL_QUERY_NAME_BUILD_URL, name, buildUrl)
+        return findArtifacts(aqlQuery)
+    }
+
+    List<ArtifactInfo> findArtifacts(String aqlQuery) {
+        List<ArtifactInfo> items = []
+        searches.aql(aqlQuery) { AqlResult result ->
+            result.each {Map item ->
+                items.add(new ArtifactInfo(name: item.name, repo: item.repo, path: item.path))
+            }
+        }
+
+        return items
+    }
 }
 
 RabbitMQHelper.startReceiver()
@@ -261,8 +376,7 @@ RabbitMQHelper.startReceiver()
  */
 storage {
     afterCreate { item ->
-        toFile(item)
-        RabbitMQHelper.publish(createEiffelArtifactPublishedEvent(item))
+        toFile(item as ItemInfo)
     }
 }
 
