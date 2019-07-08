@@ -1,40 +1,30 @@
 import groovy.json.JsonBuilder
-import groovy.json.JsonSlurper
 import spock.lang.Specification
 
 class EiffelactoryTest extends Specification {
-    def 'eiffel artifact published event is correctly constructed'() {
+    def 'eiffel artifact published event is correctly created'() {
         setup:
-        def tags = new ArrayList<String>()
-        tags.add("Tag 1")
-        tags.add("Tag 2")
-
-        def source = new Source(host: "some host", domainId: "123")
-
-        def meta = new EiffelArtifactPublishedEventMeta(tags: tags, source: source)
-
-        def locations = new ArrayList<Location>()
-        locations.add(new Location(Location.Type.ARTIFACTORY, "some/artifact/uri"))
-
-        def data = new EiffelArtifactPublishedEventData(locations)
-
-        def links = new ArrayList<Link>()
-        links.add(new Link(Link.Type.ARTIFACT, UUID.fromString("aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee1")))
-        links.add(new Link(Link.Type.CONTEXT, UUID.fromString("aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee2")))
+        def artifactInfo = new ArtifactInfo(
+                repo: "eiffel-actory-testing", path: "project-1_23", name: "filename.ext")
 
         when:
-        def event = new EiffelArtifactPublishedEvent(meta, data, links)
+        def artP = EiffelEventCreator.createEiffelArtifactPublishedEvent(
+                UUID.fromString("aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee1"), artifactInfo)
 
         then:
-        assert event.getMeta().type == "EiffelArtifactPublishedEvent"
-        assert event.getMeta().version == "3.0.0"
-        assert event.getMeta().getTags() == ["Tag 1", "Tag 2"]
-        assert event.getMeta().getSource() == [host: "some host", domainId: "123"] as Source
-        assert event.getLinks() == [
+        assert artP.getMeta().type == "EiffelArtifactPublishedEvent"
+        assert artP.getMeta().version == Constants.VERSION_3_0_0
+        assert artP.getMeta().getTags() == [artifactInfo.repo, artifactInfo.path, artifactInfo.name]
+
+        assert artP.getMeta().getSource() ==
+                [domainId: "domain-id-string", name: "Artifactory", uri: Constants.ARTIFACTORY_URI] as Source
+
+        assert artP.getLinks() == [
                 [Link.Type.ARTIFACT, UUID.fromString("aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee1")] as Link,
-                [Link.Type.CONTEXT, UUID.fromString("aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee2")] as Link
         ]
-        assert event.getData().getLocations()[0] == [Location.Type.ARTIFACTORY, "some/artifact/uri"] as Location
+
+        assert artP.getData().getLocations()[0] ==
+                [Location.Type.ARTIFACTORY, artifactInfo.getLocationPath()] as Location
     }
 
     def 'eiffel artifact created event is correctly identified by meta.type and meta.source.name'() {
@@ -74,50 +64,39 @@ class EiffelactoryTest extends Specification {
         ]
 
         when:
-        def fakeArtCMessage = new JsonBuilder(messageArtC).toString()
-        def fakeArtPMessage = new JsonBuilder(messageArtP).toString()
+        def artCMessage = new JsonBuilder(messageArtC).toString()
+        def artPMessage = new JsonBuilder(messageArtP).toString()
 
         then:
-        assert EiffelEventParser.isEiffelArtifactCreatedEvent(fakeArtCMessage)
-        assert !EiffelEventParser.isEiffelArtifactCreatedEvent(fakeArtPMessage)
-        assert EiffelEventParser.isSentFromJenkins(fakeArtCMessage)
-        assert !EiffelEventParser.isSentFromJenkins(fakeArtPMessage)
+        assert EiffelEventParser.isEiffelArtifactCreatedEvent(artCMessage)
+        assert !EiffelEventParser.isEiffelArtifactCreatedEvent(artPMessage)
+        assert EiffelEventParser.isSentFromJenkins(artCMessage)
+        assert !EiffelEventParser.isSentFromJenkins(artPMessage)
     }
 
-    def 'parse data needed from ArtC'() {
+    def 'parse identity purl from ArtC sent by EiffelBroadcaster'() {
         setup:
-        def dataArtC = [identity: "pkg:job/DEPT/job/USR/job/TEST/job/FOO/job/BAR_BAR/1234/artifacts/some_file.txt@1234"]
-        def linksArtC = ['']
-        def sourceArtC = [name: "JENKINS_EIFFEL_BROADCASTER", host: "jenkins99.some.address"]
-        def metaArtC = [
-                id: "aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee2",
-                version: "2.0.0",
-                time: 123456790,
-                type: "EiffelArtifactCreatedEvent",
-                source: sourceArtC
-        ]
-        def messageArtC = [
-                data: dataArtC,
-                links: linksArtC,
-                meta: metaArtC
-        ]
-        def fakeArtCMessage = new JsonBuilder(messageArtC).toString()
+        def identity = "pkg:job/DEPT/job/USR/job/TEST/job/FOO/job/BAR_BAR/1234/artifacts/some_file.txt@1234"
 
         when:
-        def artC = new JsonSlurper().parseText(fakeArtCMessage) as Map
-
-        def parsedIdentity = [:]
-        if (EiffelEventParser.isSentFromJenkins(fakeArtCMessage)) {
-            parsedIdentity = EiffelEventParser.parseJenkinsIdentityPurl(artC.data.identity as String)
-        }
-
-        def buildUrl = EiffelEventParser.createBuildUrl(artC.meta.source.host as String, parsedIdentity.url as String)
+        def identityInfo = EiffelEventParser.parseJenkinsIdentityPurl(identity)
 
         then:
-        assert parsedIdentity.fileName == "some_file.txt"
-        assert parsedIdentity.buildNumber == "1234"
-        assert parsedIdentity.url == "job/DEPT/job/USR/job/TEST/job/FOO/job/BAR_BAR/1234/"
-        assert buildUrl == "https://" + artC.meta.source.host + "/jenkins/" + parsedIdentity.url
-        assert artC.meta.id == "aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeee2"
+        assert identityInfo.fileName == "some_file.txt"
+        assert identityInfo.buildNumber == "1234"
+        assert identityInfo.url == "job/DEPT/job/USR/job/TEST/job/FOO/job/BAR_BAR/1234/"
+    }
+
+    def 'create build url as it appears in build info in Artifactory'() {
+        setup:
+        def artCHost = "jenkins99.some.address"
+        def identityInfo = EiffelEventParser.parseJenkinsIdentityPurl(
+                "pkg:job/DEPT/job/USR/job/TEST/job/FOO/job/BAR_BAR/1234/artifacts/some_file.txt@1234")
+
+        when:
+        def buildUrl = EiffelEventParser.createBuildUrl(artCHost, identityInfo.url)
+
+        then:
+        assert buildUrl == "https://" + artCHost + "/jenkins/" + identityInfo.url
     }
 }

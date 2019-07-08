@@ -2,10 +2,6 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.ToString
 import groovy.transform.EqualsAndHashCode
-import org.artifactory.fs.FileInfo
-import org.artifactory.fs.FileLayoutInfo
-import org.artifactory.fs.ItemInfo
-import org.artifactory.search.Searches
 import org.artifactory.search.aql.AqlResult
 // This has to be placed as a .jar under /lib
 // TODO: import  and compile later via Maven?
@@ -93,7 +89,7 @@ class Source {
     String host
     String name = "Artifactory"
     String serializer
-    String uri = "artifactory-uri"
+    String uri = Constants.ARTIFACTORY_URI
 }
 
 /**
@@ -127,6 +123,9 @@ abstract class Meta {
     }
 }
 
+/**
+ * Interface for all EiffelEvents
+ */
 interface EiffelEvent {
     Meta getMeta()
     List<Link> getLinks()
@@ -171,6 +170,33 @@ class EiffelArtifactPublishedEventData {
 }
 
 /**
+ * Holds information about an artifact retrieved by an AQL-query.
+ * Non-privileged users are only able to query for repo, path and name.
+ */
+class ArtifactInfo {
+    String repo = ""
+    String path = ""
+    String name = ""
+
+    public boolean isEmpty() {
+        return repo.isEmpty() && path.isEmpty() && name.isEmpty()
+    }
+
+    public String getLocationPath() {
+        return String.format(Constants.ARTIFACT_PATH_FORMAT, repo, path, name)
+    }
+}
+
+/**
+ * Holds information parsed from an EiffelArtifactCreatedEvent's data.identity field
+ */
+class IdentityInfo {
+    String fileName = ""
+    String buildNumber = ""
+    String url = ""
+}
+
+/**
  * Class with helper methods for handling json data
  */
 class JsonHelper {
@@ -206,7 +232,15 @@ class JsonHelper {
     }
 }
 
+/**
+ * Class with helper methods for parsing information from Eiffel events
+ */
 class EiffelEventParser {
+    /**
+     * Checks if an Eiffel event in json format is an EiffelArtifactCreatedEvent
+     * @param message an Eiffel event in json format
+     * @return true if event type is EiffelArtifactCreatedEvent
+     */
     static boolean isEiffelArtifactCreatedEvent(String message) {
         def jsonObject = new JsonSlurper().parseText(message) as Map
 
@@ -222,6 +256,11 @@ class EiffelEventParser {
         return jsonObject.meta.type == Constants.EIFFEL_ARTIFACT_CREATED_EVENT
     }
 
+    /**
+     * Checks if an Eiffel event in json format is sent by EiffelBroadcaster (Jenkins plugin)
+     * @param message an Eiffel event in json format
+     * @return true if event type is sent by EiffelBroadcaster (Jenkins-plugin)
+     */
     static boolean isSentFromJenkins(String message) {
         def jsonObject = new JsonSlurper().parseText(message) as Map
 
@@ -242,16 +281,28 @@ class EiffelEventParser {
         return jsonObject.meta.source.name == Constants.JENKINS_EIFFEL_BROADCASTER
     }
 
-    static Map parseJenkinsIdentityPurl(String identity) {
+    /**
+     * Parses the identity field in an ArtC event sent by EiffelBroadcaster (Jenkins plugin).
+     * The identity field is in purl-format.
+     * @param identity a purl-formatted string
+     * @return the parsed information: filename, build number and url
+     */
+    static IdentityInfo parseJenkinsIdentityPurl(String identity) {
         def parts = identity.split("@")
         def buildNumber = parts[1]
         def filename = parts[0].substring(identity.lastIndexOf("/") + 1)
         parts = parts[0].split("pkg:")
         def url = parts[1].substring(0, parts[1].lastIndexOf("/") - "artifacts".length())
 
-        return [buildNumber: buildNumber, fileName: filename, url: url]
+        return new IdentityInfo(buildNumber: buildNumber, fileName: filename, url: url)
     }
 
+    /**
+     * Creates a string formatted as a Jenkins' build url
+     * @param host the jenkins build server hostname
+     * @param identityUrl part of the url parsed from ArtC identity field
+     * @return a string formatted as a Jenkins' build url
+     */
     static String createBuildUrl(String host, String identityUrl) {
         return String.format(Constants.BUILD_URL_FORMAT, host, identityUrl)
     }
@@ -267,21 +318,22 @@ class EiffelEventListener extends ScriptCallback {
         }
 
         def event = new JsonSlurper().parseText(message) as Map
+        def identityInfo = EiffelEventParser.parseJenkinsIdentityPurl(event.data.identity as String)
 
-        def artifacts = new AQLQuery().findArtifactsByNameAndBuildNumber(
-                event.name as String, event.buildNumber as String)
+        // We can either find an artifact by name and build number...
+        def artifact = new ArtifactFinder().findArtifactByNameAndBuildNumber(
+                identityInfo.fileName, identityInfo.buildNumber)
 
-        if (artifacts.size() != 1) {
-            // This should not be possible
-            // TODO: Log to file if this happens
-            return
+        // ... or uncomment this to find an artifact by name and build url
+        //def buildUrl = EiffelEventParser.createBuildUrl(event.meta.host as String, identityInfo.url)
+        //def artifact = new ArtifactFinder().findArtifactByNameAndBuildUrl(identityInfo.fileName, buildUrl)
+
+        if (!artifact.isEmpty()) {
+            def artifactPublishedEvent = EiffelEventCreator.createEiffelArtifactPublishedEvent(
+                    UUID.fromString(event.meta.id as String), artifact)
+
+            RabbitMQHelper.publish(artifactPublishedEvent)
         }
-
-        def artifactPublishedEvent = EiffelArtifactPublishedEventCreator.createEiffelArtifactPublishedEvent(
-                UUID.fromString(event.meta.id as String), artifacts[0])
-
-        RabbitMQHelper.publish(artifactPublishedEvent)
-
     }
 }
 
@@ -318,9 +370,12 @@ class RabbitMQHelper {
     }
 }
 
-class EiffelArtifactPublishedEventCreator {
-    static EiffelArtifactPublishedEvent createEiffelArtifactPublishedEvent(UUID linkId, AQLQuery.ArtifactInfo artifact) {
-        def locationUri = createArtifactPath(artifact.repo, artifact.path, artifact.name)
+/**
+ * Class with factory methods for creating Eiffel events
+ */
+class EiffelEventCreator {
+    static EiffelArtifactPublishedEvent createEiffelArtifactPublishedEvent(UUID linkId, ArtifactInfo artifact) {
+        def locationUri = artifact.getLocationPath()
         def locations = [new Location(Location.Type.ARTIFACTORY, locationUri)] as ArrayList<Location>
         def links = [new Link(Link.Type.ARTIFACT, linkId)] as ArrayList<Link>
         def tags = [artifact.repo, artifact.path, artifact.name] as ArrayList<String>
@@ -331,38 +386,38 @@ class EiffelArtifactPublishedEventCreator {
 
         return event
     }
-
-    private static String createArtifactPath(String repo, String path, String name) {
-        return String.format(Constants.ARTIFACT_PATH_FORMAT, repo, path, name)
-    }
 }
 
-class AQLQuery {
-    class ArtifactInfo {
-        String repo
-        String path
-        String name
-    }
-
-    List<ArtifactInfo> findArtifactsByNameAndBuildNumber(String name, String buildNumber) {
+/**
+ * Class with helper methods for sending AQL-queries
+ */
+class ArtifactFinder {
+    ArtifactInfo findArtifactByNameAndBuildNumber(String name, String buildNumber) {
         def aqlQuery = String.format(Constants.AQL_QUERY_NAME_BUILD_NUMBER, name, buildNumber)
-        return findArtifacts(aqlQuery)
+        return findArtifact(aqlQuery)
     }
 
-    List<ArtifactInfo> findArtifactsByNameAndBuildUrl(String name, String buildUrl) {
+    ArtifactInfo findArtifactByNameAndBuildUrl(String name, String buildUrl) {
         def aqlQuery = String.format(Constants.AQL_QUERY_NAME_BUILD_URL, name, buildUrl)
-        return findArtifacts(aqlQuery)
+        return findArtifact(aqlQuery)
     }
 
-    List<ArtifactInfo> findArtifacts(String aqlQuery) {
+    ArtifactInfo findArtifact(String aqlQuery) {
         List<ArtifactInfo> items = []
         searches.aql(aqlQuery) { AqlResult result ->
-            result.each {Map item ->
-                items.add(new ArtifactInfo(name: item.name, repo: item.repo, path: item.path))
+            result.each { Map item ->
+                items.add(new ArtifactInfo(repo: item.repo, path: item.path, name: item.name))
             }
         }
 
-        return items
+        // Theoretically the AQL-query should only ever find a single artifact.
+        // If it finds more than one we have a problem and we need to rethink how to identify an artifact.
+        // For now just log if this happens so it can be investigated.
+        if (items.size() > 1) {
+            // TODO: Log if this happens
+        }
+
+        return items.size() > 0 ? items[0] : new ArtifactInfo()
     }
 }
 
@@ -376,7 +431,10 @@ RabbitMQHelper.startReceiver()
  */
 storage {
     afterCreate { item ->
-        toFile(item as ItemInfo)
+        // Unclear if we need to use this callback.
+        // If it is possible to receive an ArtC from EiffelBroadcaster before the artifact is available in Artifactory
+        // we might need to save ArtC-events and match them against artifacts after they are created.
+        // This requires some kind of bookkeeping or ArtC-events for some X amount of time.
     }
 }
 
@@ -391,71 +449,5 @@ executions {
         }
         RabbitMQHelper.stopped = true
     }
-}
-
-def getMetadata(String repoKey) {
-    File storageLog = new File("/tmp/storage_metadata.log")
-    // <domain_query>.find(<criteria>).include(<fields>).sort(<order_and_fields>).offset(<offset_records>).limit(<num_records>)
-    ((Searches) searches).aql(
-        "items.find({\"repo\": \"" + repoKey + "\"}).include(\"name\", \"repo\", \"property.*\")") {
-        AqlResult result ->
-            result.each {
-                storageLog.append(JsonOutput.prettyPrint(JsonOutput.toJson(result)))
-            }
-    }
-}
-
-def toFile(ItemInfo item) {
-    File f = new File("/tmp/upload_metadata.log")
-    def created = item.getCreated() as String
-    def createdBy = item.getCreatedBy()
-    def id = item.getId() as String
-    def lastModified = item.getLastModified() as String
-    def lastUpd = item.getLastUpdated() as String
-    def modifiedBy = item.getModifiedBy() as String
-    def name = item.getName()
-    def relPath = item.getRelPath()
-    def repoKey = item.getRepoKey()
-    def repoPath = item.getRepoPath().toPath()
-    def isFolder = item.isFolder() as String
-
-    f.write("Name: " + name + "\n" +
-            "Created: " + created + "\n" +
-            "Created by: " + createdBy  + "\n" +
-            "Id: " + id  + "\n" +
-            "Last mod: " + lastModified  + "\n" +
-            "last upd: " + lastUpd + "\n" +
-            "Mod by: " + modifiedBy  + "\n" +
-            "Rel path: " + relPath  + "\n" +
-            "Repo key: " + repoKey  + "\n" +
-            "Repo path: " + repoPath  + "\n" +
-            "is folder: " + isFolder + "\n" )
-
-    if (item instanceof FileInfo) {
-        def fileInfo = item as FileInfo
-        def sha256 = fileInfo.getSha2()
-        def sha1 = fileInfo.getSha1()
-        def md5 = fileInfo.getMd5()
-        def mime = fileInfo.getMimeType()
-        def age = fileInfo.getAge() as String
-        def size = fileInfo.getSize()
-
-        f.append("sha256: " + sha256 + "\n" +
-                "sha1: " + sha1 + "\n" +
-                "md5: " + md5 + "\n" +
-                "Mime: " + mime + "\n" +
-                "Age: "  + age + "\n" +
-                "Size: " + size + "\n")
-    }
-
-    if (item instanceof FileLayoutInfo) {
-        def fileLayout = item as FileLayoutInfo
-
-        f.append("base revision: " + fileLayout.getBaseRevision() + "\n" +
-                "Classifier : " + fileLayout.getClassifier() + "\n" +
-                "Ext : " + fileLayout.getExt() + "\n")
-    }
-
-    getMetadata(repoKey)
 }
 
